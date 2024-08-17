@@ -1,1 +1,262 @@
  
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Badminton Video Labeling Platform</title>
+    <link href="https://stackpath.bootstrapcdn.com/bootstrap/4.3.1/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        #video-container {
+            position: relative;
+            width: 100%;
+            max-width: 1280px;
+            margin: 0 auto;
+        }
+        #court-overlay, #trajectory-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+        }
+        #label-info {
+            height: 200px;
+            overflow-y: auto;
+            border: 1px solid #ddd;
+            padding: 10px;
+            margin-top: 20px;
+        }
+        .label-button {
+            margin: 5px;
+        }
+        #frame-navigation {
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container mt-4">
+        <h2>Badminton Video Labeling Platform</h2>
+        <div class="row">
+            <div class="col-md-12">
+                <form id="video-form">
+                    <div class="form-group">
+                        <label for="video-input">Upload video file (.mp4 or .mov) or enter URL:</label>
+                        <input type="file" class="form-control" id="video-file" accept=".mp4,.mov">
+                        <input type="text" class="form-control mt-2" id="video-url" placeholder="Enter video URL">
+                    </div>
+                    <button type="submit" class="btn btn-primary">Load Video</button>
+                </form>
+            </div>
+        </div>
+
+        <div class="row mt-4">
+            <div class="col-md-12">
+                <div id="video-container">
+                    <video id="video-player" controls width="100%">
+                        Your browser does not support the video tag.
+                    </video>
+                    <canvas id="court-overlay"></canvas>
+                    <canvas id="trajectory-overlay"></canvas>
+                </div>
+                <div id="frame-navigation" class="mt-2">
+                    <button class="btn btn-secondary" onclick="moveFrames(-1)">-1 Frame</button>
+                    <button class="btn btn-secondary" onclick="moveFrames(-5)">-5 Frames</button>
+                    <span id="current-frame" class="mx-2">Frame: 0</span>
+                    <button class="btn btn-secondary" onclick="moveFrames(5)">+5 Frames</button>
+                    <button class="btn btn-secondary" onclick="moveFrames(1)">+1 Frame</button>
+                    <input type="number" id="frame-jump" placeholder="Jump to frame" class="form-control d-inline-block" style="width: 150px;">
+                    <button class="btn btn-secondary" onclick="jumpToFrame()">Jump</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="row mt-4">
+            <div class="col-md-12">
+                <button id="start-rally" class="btn btn-success">Start Rally</button>
+                <button id="end-rally" class="btn btn-danger">End Rally</button>
+                <button id="mark-hit" class="btn btn-primary">Mark Hit</button>
+                <button id="mark-receive" class="btn btn-info">Mark Receive/Landing</button>
+                <button id="dead-bird" class="btn btn-warning">Dead Bird</button>
+            </div>
+        </div>
+
+        <div class="row mt-2">
+            <div class="col-md-4">
+                <select id="stroke-type" class="form-control">
+                    <option value="">Select Stroke Type</option>
+                    <option value="long-serve">Long Serve</option>
+                    <option value="short-serve">Short Serve</option>
+                    <option value="clear">Clear</option>
+                    <option value="drop">Drop</option>
+                    <option value="smash">Smash</option>
+                    <option value="drive">Drive</option>
+                    <option value="net-shot">Net Shot</option>
+                    <option value="lob">Lob</option>
+                    <!-- Add more stroke types as needed -->
+                </select>
+            </div>
+            <div class="col-md-8">
+                <button class="btn btn-secondary label-button" onclick="labelShot('forehand')">Forehand</button>
+                <button class="btn btn-secondary label-button" onclick="labelShot('backhand')">Backhand</button>
+                <button class="btn btn-secondary label-button" onclick="labelShot('round-head')">Round-the-head</button>
+                <button class="btn btn-secondary label-button" onclick="labelShot('over-net')">Over Net</button>
+                <button class="btn btn-secondary label-button" onclick="labelShot('below-net')">Below Net</button>
+            </div>
+        </div>
+
+        <div class="row mt-4">
+            <div class="col-md-12">
+                <div id="label-info"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const videoPlayer = document.getElementById('video-player');
+        const courtOverlay = document.getElementById('court-overlay');
+        const trajectoryOverlay = document.getElementById('trajectory-overlay');
+        const labelInfo = document.getElementById('label-info');
+        const currentFrameDisplay = document.getElementById('current-frame');
+        let isRallyActive = false;
+        let currentShot = {};
+        const FPS = 30;
+
+        document.getElementById('video-form').onsubmit = function(e) {
+            e.preventDefault();
+            const file = document.getElementById('video-file').files[0];
+            const url = document.getElementById('video-url').value;
+
+            if (file) {
+                videoPlayer.src = URL.createObjectURL(file);
+            } else if (url) {
+                videoPlayer.src = url;
+            }
+        };
+
+        document.getElementById('start-rally').onclick = startRally;
+        document.getElementById('end-rally').onclick = endRally;
+        document.getElementById('mark-hit').onclick = markHit;
+        document.getElementById('mark-receive').onclick = markReceive;
+        document.getElementById('dead-bird').onclick = markDeadBird;
+
+        videoPlayer.onclick = function(e) {
+            const rect = this.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+            const currentFrame = getCurrentFrame();
+
+            if (currentShot.hitTime && !currentShot.hitterLocation) {
+                currentShot.hitterLocation = { x, y };
+                updateLabelInfo("Hitter location marked at (" + x.toFixed(2) + ", " + y.toFixed(2) + ")");
+                displayCourtProjection(x, y);
+            } else if (currentShot.hitterLocation && !currentShot.opponentLocation) {
+                currentShot.opponentLocation = { x, y };
+                updateLabelInfo("Opponent location marked at (" + x.toFixed(2) + ", " + y.toFixed(2) + ")");
+                displayCourtProjection(x, y);
+            } else if (currentShot.receiveTime && !currentShot.landingLocation) {
+                currentShot.landingLocation = { x, y };
+                updateLabelInfo("Shuttlecock landing location marked at (" + x.toFixed(2) + ", " + y.toFixed(2) + ")");
+                displayCourtProjection(x, y);
+            }
+        };
+
+        function startRally() {
+            isRallyActive = true;
+            currentShot = {};
+            updateLabelInfo("Rally started");
+        }
+
+        function endRally() {
+            isRallyActive = false;
+            updateLabelInfo("Rally ended");
+        }
+
+        function markHit() {
+            if (isRallyActive) {
+                currentShot.hitTime = getCurrentFrame();
+                updateLabelInfo("Hit marked at frame " + currentShot.hitTime);
+                showTrajectory();
+            }
+        }
+
+        function markReceive() {
+            if (isRallyActive && currentShot.hitTime) {
+                currentShot.receiveTime = getCurrentFrame();
+                updateLabelInfo("Receive/Landing marked at frame " + currentShot.receiveTime);
+                hideTrajectory();
+            }
+        }
+
+        function markDeadBird() {
+            if (isRallyActive) {
+                currentShot.isDeadBird = true;
+                showDeadBirdReasonMenu();
+            }
+        }
+
+        function labelShot(attribute) {
+            if (isRallyActive) {
+                currentShot[attribute] = true;
+                updateLabelInfo(attribute + " labeled");
+            }
+        }
+
+        function moveFrames(frameDelta) {
+            const currentTime = videoPlayer.currentTime;
+            const newTime = currentTime + (frameDelta / FPS);
+            videoPlayer.currentTime = Math.max(0, Math.min(newTime, videoPlayer.duration));
+            updateCurrentFrameDisplay();
+        }
+
+        function jumpToFrame() {
+            const frameNumber = parseInt(document.getElementById('frame-jump').value);
+            if (!isNaN(frameNumber) && frameNumber >= 0) {
+                videoPlayer.currentTime = frameNumber / FPS;
+                updateCurrentFrameDisplay();
+            }
+        }
+
+        function updateCurrentFrameDisplay() {
+            const currentFrame = getCurrentFrame();
+            currentFrameDisplay.textContent = `Frame: ${currentFrame}`;
+        }
+
+        function getCurrentFrame() {
+            return Math.floor(videoPlayer.currentTime * FPS);
+        }
+
+        function updateLabelInfo(info) {
+            labelInfo.innerHTML += info + "<br>";
+            labelInfo.scrollTop = labelInfo.scrollHeight;
+        }
+
+        function showTrajectory() {
+            // Implementation for showing shuttlecock trajectory
+            console.log("Showing trajectory");
+        }
+
+        function hideTrajectory() {
+            // Implementation for hiding shuttlecock trajectory
+            console.log("Hiding trajectory");
+        }
+
+        function displayCourtProjection(x, y) {
+            // Implementation for displaying court projection of clicked point
+            console.log("Displaying court projection at", x, y);
+        }
+
+        function showDeadBirdReasonMenu() {
+            // Implementation for showing dead bird reason menu
+            console.log("Showing dead bird reason menu");
+        }
+
+        videoPlayer.ontimeupdate = updateCurrentFrameDisplay;
+
+        // Additional functions for drawing court overlay, validating inputs, etc. can be added here
+    </script>
+</body>
+</html>
+Last edited just now
